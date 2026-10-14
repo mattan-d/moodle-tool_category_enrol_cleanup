@@ -24,7 +24,7 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-if ($hassiteconfig) {
+if ($hassiteconfig || has_capability('tool/category_enrol_cleanup:execute', context_system::instance())) {
     $ADMIN->add('courses', new admin_externalpage(
         'toolcategoryenrolcleanup',
         get_string('pluginname', 'tool_category_enrol_cleanup'),
