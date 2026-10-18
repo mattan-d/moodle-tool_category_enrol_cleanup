@@ -31,4 +31,10 @@ if ($hassiteconfig || has_capability('tool/category_enrol_cleanup:execute', cont
         "$CFG->wwwroot/$CFG->admin/tool/category_enrol_cleanup/index.php",
         'tool/category_enrol_cleanup:execute'
     ));
+    $ADMIN->add('users', new admin_externalpage(
+        'toolcategoryenrolcleanupupload',
+        get_string('uploadexcel', 'tool_category_enrol_cleanup'),
+        "$CFG->wwwroot/$CFG->admin/tool/category_enrol_cleanup/upload.php",
+        'tool/category_enrol_cleanup:execute'
+    ));
 }

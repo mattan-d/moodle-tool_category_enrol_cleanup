@@ -65,6 +65,14 @@ echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('pluginname', 'tool_category_enrol_cleanup'));
 echo $OUTPUT->notification(get_string('description', 'tool_category_enrol_cleanup'), \core\output\notification::NOTIFY_INFO);
 
+echo $OUTPUT->heading(get_string('uploadheading', 'tool_category_enrol_cleanup'), 3);
+echo $OUTPUT->notification(get_string('uploaddescription', 'tool_category_enrol_cleanup'), \core\output\notification::NOTIFY_INFO);
+echo $OUTPUT->single_button(
+    new moodle_url('/admin/tool/category_enrol_cleanup/upload.php'),
+    get_string('uploadexcel', 'tool_category_enrol_cleanup')
+);
+
+echo $OUTPUT->heading(get_string('categoryheading', 'tool_category_enrol_cleanup'), 3);
 $form->display();
 
 echo $OUTPUT->heading(get_string('runs', 'tool_category_enrol_cleanup'), 3);

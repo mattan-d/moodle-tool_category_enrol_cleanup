@@ -55,6 +55,11 @@ class provider implements
             'categoryname' => 'privacy:metadata:tool_catenclean_run:categoryname',
             'timecreated' => 'privacy:metadata:tool_catenclean_run:timecreated',
         ], 'privacy:metadata:tool_catenclean_run');
+        $collection->add_database_table('tool_catenclean_row', [
+            'userid' => 'privacy:metadata:tool_catenclean_row:userid',
+            'userlabel' => 'privacy:metadata:tool_catenclean_row:userlabel',
+            'courselabel' => 'privacy:metadata:tool_catenclean_row:courselabel',
+        ], 'privacy:metadata:tool_catenclean_row');
         return $collection;
     }
 
@@ -75,6 +80,15 @@ class provider implements
             'userlevel' => CONTEXT_USER,
             'userid' => $userid,
         ]);
+        $rowsql = "SELECT ctx.id
+                     FROM {context} ctx
+                     JOIN {tool_catenclean_row} r ON r.userid = ctx.instanceid
+                    WHERE ctx.contextlevel = :userlevel
+                      AND r.userid = :userid";
+        $contextlist->add_from_sql($rowsql, [
+            'userlevel' => CONTEXT_USER,
+            'userid' => $userid,
+        ]);
         return $contextlist;
     }
 
@@ -92,12 +106,16 @@ class provider implements
                 continue;
             }
             $runs = $DB->get_records('tool_catenclean_run', ['userid' => $userid], 'id ASC');
-            if (!$runs) {
+            $rows = $DB->get_records('tool_catenclean_row', ['userid' => $userid], 'id ASC');
+            if (!$runs && !$rows) {
                 continue;
             }
             writer::with_context($context)->export_data(
                 [get_string('pluginname', 'tool_category_enrol_cleanup')],
-                (object) ['runs' => array_values($runs)]
+                (object) [
+                    'runs' => array_values($runs ?: []),
+                    'rows' => array_values($rows ?: []),
+                ]
             );
         }
     }
@@ -142,6 +160,10 @@ class provider implements
                   FROM {tool_catenclean_run}
                  WHERE userid = :userid";
         $userlist->add_from_sql('userid', $sql, ['userid' => $context->instanceid]);
+        $rowsql = "SELECT userid
+                     FROM {tool_catenclean_row}
+                    WHERE userid = :userid";
+        $userlist->add_from_sql('userid', $rowsql, ['userid' => $context->instanceid]);
     }
 
     /**
@@ -173,7 +195,14 @@ class provider implements
         if ($runids) {
             [$insql, $params] = $DB->get_in_or_equal($runids);
             $DB->delete_records_select('tool_catenclean_item', "runid $insql", $params);
+            $DB->delete_records_select('tool_catenclean_row', "runid $insql", $params);
         }
+        $DB->delete_records('tool_catenclean_row', ['userid' => $userid]);
         $DB->delete_records('tool_catenclean_run', ['userid' => $userid]);
+        $DB->delete_records('tool_catenclean_import', ['userid' => $userid]);
+        $context = \context_user::instance($userid, IGNORE_MISSING);
+        if ($context) {
+            get_file_storage()->delete_area_files($context->id, 'tool_category_enrol_cleanup', 'import');
+        }
     }
 }

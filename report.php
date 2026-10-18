@@ -58,8 +58,9 @@ $percent = (int) $run->coursecount > 0
     ? (int) round(((int) $run->coursesdone / (int) $run->coursecount) * 100)
     : ($run->status === manager::STATUS_COMPLETED ? 100 : 0);
 
+$isfile = ($run->source ?? manager::SOURCE_CATEGORY) === manager::SOURCE_FILE;
 $current = null;
-if ($busy) {
+if ($busy && !$isfile) {
     $pending = $DB->get_records_select(
         'tool_catenclean_item',
         'runid = :runid AND status = :pending',
@@ -72,15 +73,13 @@ if ($busy) {
     $current = $pending ? reset($pending) : null;
 }
 
-$itemcount = $DB->count_records('tool_catenclean_item', ['runid' => $run->id]);
-$items = $DB->get_records(
-    'tool_catenclean_item',
-    ['runid' => $run->id],
-    'id ASC',
-    '*',
-    $page * $perpage,
-    $perpage
-);
+if ($isfile) {
+    $itemcount = $DB->count_records('tool_catenclean_row', ['runid' => $run->id]);
+    $items = $DB->get_records('tool_catenclean_row', ['runid' => $run->id], 'id ASC', '*', $page * $perpage, $perpage);
+} else {
+    $itemcount = $DB->count_records('tool_catenclean_item', ['runid' => $run->id]);
+    $items = $DB->get_records('tool_catenclean_item', ['runid' => $run->id], 'id ASC', '*', $page * $perpage, $perpage);
+}
 
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('report', 'tool_category_enrol_cleanup'));
@@ -92,7 +91,7 @@ if ($run->status === manager::STATUS_COMPLETED) {
     $note = \core\output\notification::NOTIFY_ERROR;
 }
 echo $OUTPUT->notification(
-    get_string('summary', 'tool_category_enrol_cleanup', (object) [
+    get_string($isfile ? 'summaryrows' : 'summary', 'tool_category_enrol_cleanup', (object) [
         'courses' => (int) $run->coursesdone . ' / ' . (int) $run->coursecount,
         'unenrolments' => (int) $run->unenrolcount,
         'roles' => (int) $run->rolecount,
@@ -114,11 +113,18 @@ echo html_writer::div(
 $summary = new html_table();
 $summary->attributes['class'] = 'generaltable';
 $summary->data = [
-    [get_string('category', 'tool_category_enrol_cleanup'), format_string($run->categoryname)],
     [
+        get_string($isfile ? 'excelfile' : 'category', 'tool_category_enrol_cleanup'),
+        $isfile ? s($run->categoryname) : format_string($run->categoryname),
+    ],
+];
+if (!$isfile) {
+    $summary->data[] = [
         get_string('includesubcats', 'tool_category_enrol_cleanup'),
         !empty($run->includesubcats) ? get_string('yes') : get_string('no'),
-    ],
+    ];
+}
+$summary->data = array_merge($summary->data, [
     [get_string('status', 'tool_category_enrol_cleanup'), manager::status_label($run->status)],
     [get_string('progress', 'tool_category_enrol_cleanup'), (int) $run->coursesdone . ' / ' . (int) $run->coursecount],
     [get_string('unenrolcount', 'tool_category_enrol_cleanup'), (int) $run->unenrolcount],
@@ -128,7 +134,7 @@ $summary->data = [
     [get_string('started', 'tool_category_enrol_cleanup'), !empty($run->timestarted) ? userdate($run->timestarted) : '-'],
     [get_string('finished', 'tool_category_enrol_cleanup'), !empty($run->timefinished) ? userdate($run->timefinished) : '-'],
     [get_string('duration', 'tool_category_enrol_cleanup'), $duration],
-];
+]);
 echo html_writer::table($summary);
 
 if (!empty($run->lasterror)) {
@@ -158,24 +164,51 @@ if ($run->status !== manager::STATUS_COMPLETED && !cleanup_task::is_queued((int)
 
 if ($items) {
     $table = new html_table();
-    $table->head = [
-        get_string('course', 'tool_category_enrol_cleanup'),
-        get_string('shortname', 'tool_category_enrol_cleanup'),
-        get_string('status', 'tool_category_enrol_cleanup'),
-        get_string('unenrolcount', 'tool_category_enrol_cleanup'),
-        get_string('rolecount', 'tool_category_enrol_cleanup'),
-    ];
     $table->attributes['class'] = 'generaltable';
-    foreach ($items as $item) {
-        $courseurl = new moodle_url('/user/index.php', ['id' => $item->courseid]);
-        $coursename = html_writer::link($courseurl, format_string($item->fullname));
-        $table->data[] = [
-            $coursename,
-            s($item->shortname),
-            manager::status_label($item->status),
-            (int) $item->unenrolcount,
-            (int) $item->rolecount,
+    if ($isfile) {
+        $table->head = [
+            get_string('line', 'tool_category_enrol_cleanup'),
+            get_string('course', 'tool_category_enrol_cleanup'),
+            get_string('user', 'tool_category_enrol_cleanup'),
+            get_string('status', 'tool_category_enrol_cleanup'),
+            get_string('unenrolcount', 'tool_category_enrol_cleanup'),
+            get_string('rolecount', 'tool_category_enrol_cleanup'),
+            get_string('result', 'tool_category_enrol_cleanup'),
         ];
+        foreach ($items as $item) {
+            $course = s($item->courselabel);
+            if (!empty($item->courseid)) {
+                $course = html_writer::link(new moodle_url('/user/index.php', ['id' => $item->courseid]), $course);
+            }
+            $table->data[] = [
+                (int) $item->linenum,
+                $course,
+                s($item->userlabel),
+                manager::status_label($item->status),
+                (int) $item->unenrolcount,
+                (int) $item->rolecount,
+                s($item->message),
+            ];
+        }
+    } else {
+        $table->head = [
+            get_string('course', 'tool_category_enrol_cleanup'),
+            get_string('shortname', 'tool_category_enrol_cleanup'),
+            get_string('status', 'tool_category_enrol_cleanup'),
+            get_string('unenrolcount', 'tool_category_enrol_cleanup'),
+            get_string('rolecount', 'tool_category_enrol_cleanup'),
+        ];
+        foreach ($items as $item) {
+            $courseurl = new moodle_url('/user/index.php', ['id' => $item->courseid]);
+            $coursename = html_writer::link($courseurl, format_string($item->fullname));
+            $table->data[] = [
+                $coursename,
+                s($item->shortname),
+                manager::status_label($item->status),
+                (int) $item->unenrolcount,
+                (int) $item->rolecount,
+            ];
+        }
     }
     echo html_writer::table($table);
     echo $OUTPUT->paging_bar($itemcount, $page, $perpage, $url);

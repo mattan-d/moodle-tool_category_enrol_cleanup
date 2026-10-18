@@ -57,6 +57,15 @@ class manager {
     /** @var string Course cleanup stopped. */
     public const COURSE_FAILED = 'failed';
 
+    /** @var string Row had nothing to remove. */
+    public const COURSE_SKIPPED = 'skipped';
+
+    /** @var string Cleanup was started from a category. */
+    public const SOURCE_CATEGORY = 'category';
+
+    /** @var string Cleanup was started from a spreadsheet. */
+    public const SOURCE_FILE = 'file';
+
     /** @var int Enrolment rows handled before the clock is checked again. */
     public const USER_BATCH = 40;
 
@@ -203,6 +212,10 @@ class manager {
         if (empty($run->timestarted)) {
             $DB->set_field('tool_catenclean_run', 'timestarted', $now, ['id' => $run->id]);
             $run->timestarted = $now;
+        }
+
+        if (($run->source ?? self::SOURCE_CATEGORY) === self::SOURCE_FILE) {
+            return self::process_file_rows($run, $maxruntime);
         }
 
         if (empty($run->snapshotted)) {
@@ -737,6 +750,27 @@ class manager {
     private static function refresh_totals(\stdClass $run): void {
         global $DB;
 
+        if (($run->source ?? self::SOURCE_CATEGORY) === self::SOURCE_FILE) {
+            $totals = $DB->get_record_sql(
+                "SELECT COALESCE(SUM(unenrolcount), 0) AS unenrolcount,
+                        COALESCE(SUM(rolecount), 0) AS rolecount,
+                        COALESCE(SUM(CASE WHEN status <> :pending THEN 1 ELSE 0 END), 0) AS coursesdone
+                   FROM {tool_catenclean_row}
+                  WHERE runid = :runid",
+                [
+                    'runid' => $run->id,
+                    'pending' => self::COURSE_PENDING,
+                ]
+            );
+            $run->unenrolcount = (int) $totals->unenrolcount;
+            $run->rolecount = (int) $totals->rolecount;
+            $run->coursesdone = (int) $totals->coursesdone;
+            $DB->set_field('tool_catenclean_run', 'unenrolcount', $run->unenrolcount, ['id' => $run->id]);
+            $DB->set_field('tool_catenclean_run', 'rolecount', $run->rolecount, ['id' => $run->id]);
+            $DB->set_field('tool_catenclean_run', 'coursesdone', $run->coursesdone, ['id' => $run->id]);
+            return;
+        }
+
         $totals = $DB->get_record_sql(
             "SELECT COALESCE(SUM(unenrolcount), 0) AS unenrolcount,
                     COALESCE(SUM(rolecount), 0) AS rolecount,
@@ -772,7 +806,10 @@ class manager {
         $run->status = self::STATUS_COMPLETED;
         $run->timefinished = $finished;
 
-        $context = \context_coursecat::instance($run->categoryid, IGNORE_MISSING);
+        $context = false;
+        if (!empty($run->categoryid)) {
+            $context = \context_coursecat::instance($run->categoryid, IGNORE_MISSING);
+        }
         if (!$context) {
             $context = \context_system::instance();
         }
@@ -786,5 +823,195 @@ class manager {
             ],
         ]);
         $event->trigger();
+    }
+
+    /**
+     * Removes spreadsheet rows in short slices.
+     *
+     * @param \stdClass $run
+     * @param int $maxruntime
+     * @return bool True when the run is finished
+     */
+    private static function process_file_rows(\stdClass $run, int $maxruntime): bool {
+        global $DB;
+
+        $started = time();
+        while ((time() - $started) < $maxruntime) {
+            $rows = $DB->get_records_select(
+                'tool_catenclean_row',
+                'runid = :runid AND status = :pending',
+                ['runid' => $run->id, 'pending' => self::COURSE_PENDING],
+                'id ASC',
+                '*',
+                0,
+                1
+            );
+            if (!$rows) {
+                self::complete_run($run);
+                return true;
+            }
+            $row = reset($rows);
+            self::process_file_row($run, $row);
+            self::refresh_totals($run);
+        }
+        return false;
+    }
+
+    /**
+     * Removes one user's enrolment and roles from one course.
+     *
+     * @param \stdClass $run
+     * @param \stdClass $row
+     */
+    private static function process_file_row(\stdClass $run, \stdClass $row): void {
+        global $DB;
+
+        try {
+            $result = self::remove_user_from_course((int) $row->courseid, (int) $row->userid, (int) $row->roleid);
+            $row->unenrolcount = $result['unenrolments'];
+            $row->rolecount = $result['roles'];
+            $row->status = self::COURSE_DONE;
+            if ($result['unenrolments'] === 0 && $result['roles'] === 0) {
+                $row->message = get_string('notenrolled', 'tool_category_enrol_cleanup');
+            }
+        } catch (\Throwable $e) {
+            $row->status = self::COURSE_FAILED;
+            $row->message = \core_text::substr($e->getMessage(), 0, 500);
+            self::bump_run_error($run, $row->message);
+        }
+        $row->timemodified = time();
+        $DB->update_record('tool_catenclean_row', $row);
+    }
+
+    /**
+     * Unenrols one user from a course and removes that user's roles there.
+     *
+     * When $roleid is set, only that role is removed, together with the enrolment
+     * instance that assigned it. Other enrolments of the same user stay.
+     *
+     * @param int $courseid
+     * @param int $userid
+     * @param int $roleid
+     * @return array{unenrolments: int, roles: int}
+     */
+    public static function remove_user_from_course(int $courseid, int $userid, int $roleid = 0): array {
+        global $CFG, $DB;
+
+        require_once($CFG->libdir . '/enrollib.php');
+
+        $context = \context_course::instance($courseid, MUST_EXIST);
+        $before = self::count_user_roles($userid, $context, $roleid);
+        $unenrolments = 0;
+        $plugins = [];
+
+        if ($roleid > 0) {
+            $assignments = $DB->get_records('role_assignments', [
+                'contextid' => $context->id,
+                'userid' => $userid,
+                'roleid' => $roleid,
+            ]);
+            foreach ($assignments as $assignment) {
+                if (strpos((string) $assignment->component, 'enrol_') !== 0 || empty($assignment->itemid)) {
+                    continue;
+                }
+                if (self::unenrol_instance((int) $assignment->itemid, $userid, $plugins)) {
+                    $unenrolments++;
+                }
+            }
+            role_unassign_all([
+                'userid' => $userid,
+                'contextid' => $context->id,
+                'roleid' => $roleid,
+            ], true);
+        } else {
+            $enrolments = $DB->get_records_sql(
+                "SELECT ue.id, ue.userid, ue.enrolid, e.enrol
+                   FROM {user_enrolments} ue
+                   JOIN {enrol} e ON e.id = ue.enrolid
+                  WHERE e.courseid = :courseid AND ue.userid = :userid",
+                ['courseid' => $courseid, 'userid' => $userid]
+            );
+            foreach ($enrolments as $enrolment) {
+                if (self::unenrol_instance((int) $enrolment->enrolid, $userid, $plugins)) {
+                    $unenrolments++;
+                }
+            }
+            role_unassign_all([
+                'userid' => $userid,
+                'contextid' => $context->id,
+            ], true);
+        }
+
+        $after = self::count_user_roles($userid, $context, $roleid);
+        return [
+            'unenrolments' => $unenrolments,
+            'roles' => max(0, $before - $after),
+        ];
+    }
+
+    /**
+     * @param int $userid
+     * @param \context $context
+     * @param int $roleid Zero counts every role
+     * @return int
+     */
+    private static function count_user_roles(int $userid, \context $context, int $roleid = 0): int {
+        global $DB;
+
+        $params = [
+            'userid' => $userid,
+            'contextid' => $context->id,
+            'path' => $context->path . '/%',
+        ];
+        $rolesql = '';
+        if ($roleid > 0) {
+            $rolesql = ' AND ra.roleid = :roleid';
+            $params['roleid'] = $roleid;
+        }
+        return (int) $DB->count_records_sql(
+            "SELECT COUNT(ra.id)
+               FROM {role_assignments} ra
+               JOIN {context} ctx ON ctx.id = ra.contextid
+              WHERE ra.userid = :userid
+                    $rolesql
+                AND (ctx.id = :contextid OR ctx.path LIKE :path)",
+            $params
+        );
+    }
+
+    /**
+     * Unenrols one user from one enrolment instance.
+     *
+     * @param int $instanceid
+     * @param int $userid
+     * @param array $plugins
+     * @return bool True when an enrolment row was removed
+     */
+    private static function unenrol_instance(int $instanceid, int $userid, array &$plugins): bool {
+        global $DB;
+
+        $instance = $DB->get_record('enrol', ['id' => $instanceid]);
+        $enrolment = $DB->get_record('user_enrolments', ['enrolid' => $instanceid, 'userid' => $userid]);
+        if (!$instance || !$enrolment) {
+            return false;
+        }
+        $enrolment->enrol = $instance->enrol;
+        if (!array_key_exists($instance->enrol, $plugins)) {
+            $plugins[$instance->enrol] = enrol_get_plugin($instance->enrol);
+        }
+        $context = \context_course::instance($instance->courseid);
+        try {
+            if ($plugins[$instance->enrol]) {
+                $plugins[$instance->enrol]->unenrol_user($instance, $userid);
+            } else {
+                self::force_remove_enrolment($enrolment, $context);
+            }
+        } catch (\Throwable $e) {
+            self::force_remove_enrolment($enrolment, $context);
+        }
+        if ($DB->record_exists('user_enrolments', ['id' => $enrolment->id])) {
+            self::force_remove_enrolment($enrolment, $context);
+        }
+        return !$DB->record_exists('user_enrolments', ['id' => $enrolment->id]);
     }
 }
