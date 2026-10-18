@@ -38,20 +38,16 @@ $url = new moodle_url('/admin/tool/category_enrol_cleanup/confirm.php', [
 admin_externalpage_setup('toolcategoryenrolcleanup', '', null, $url);
 $PAGE->set_title(get_string('pluginname', 'tool_category_enrol_cleanup'));
 
-$preview = manager::get_preview($categoryid, (bool) $includesubcats);
 $returnurl = new moodle_url('/admin/tool/category_enrol_cleanup/index.php');
 
 if ($confirm) {
     require_sesskey();
     $understand = optional_param('understand', 0, PARAM_BOOL);
-    if (!$understand) {
-        \core\notification::error(get_string('mustunderstand', 'tool_category_enrol_cleanup'));
-    } else if ($active = manager::get_active_run($categoryid)) {
-        $reporturl = new moodle_url('/admin/tool/category_enrol_cleanup/report.php', ['id' => $active->id]);
-        throw new moodle_exception('alreadyrunning', 'tool_category_enrol_cleanup', $reporturl);
-    } else if ($preview->coursecount < 1) {
-        \core\notification::error(get_string('nocourses', 'tool_category_enrol_cleanup'));
-    } else {
+    if ($understand) {
+        if ($active = manager::get_active_run($categoryid)) {
+            $reporturl = new moodle_url('/admin/tool/category_enrol_cleanup/report.php', ['id' => $active->id]);
+            throw new moodle_exception('alreadyrunning', 'tool_category_enrol_cleanup', $reporturl);
+        }
         $runid = manager::queue($categoryid, (bool) $includesubcats, (int) $USER->id);
         redirect(
             new moodle_url('/admin/tool/category_enrol_cleanup/report.php', ['id' => $runid]),
@@ -60,7 +56,10 @@ if ($confirm) {
             \core\output\notification::NOTIFY_SUCCESS
         );
     }
+    \core\notification::error(get_string('mustunderstand', 'tool_category_enrol_cleanup'));
 }
+
+$preview = manager::get_preview($categoryid, (bool) $includesubcats);
 
 $catcontext = context_coursecat::instance($categoryid);
 $categoryname = format_string($preview->categoryname, true, ['context' => $catcontext]);

@@ -836,6 +836,13 @@ class manager {
         global $DB;
 
         $started = time();
+        if (empty($run->snapshotted)) {
+            $loaded = importer::snapshot_run($run, $started, $maxruntime);
+            if (!$loaded) {
+                return false;
+            }
+            $run = self::get_run((int) $run->id);
+        }
         while ((time() - $started) < $maxruntime) {
             $rows = $DB->get_records_select(
                 'tool_catenclean_row',

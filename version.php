@@ -24,7 +24,7 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-$plugin->version   = 2026101800;
+$plugin->version   = 2026101801;
 $plugin->requires  = 2024100100;
 $plugin->component = 'tool_category_enrol_cleanup';
 $plugin->maturity  = MATURITY_STABLE;

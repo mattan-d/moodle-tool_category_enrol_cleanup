@@ -12,6 +12,7 @@
         <FIELD NAME="categoryname" TYPE="char" LENGTH="1333" NOTNULL="true" SEQUENCE="false" COMMENT="Category path captured when the run was queued"/>
         <FIELD NAME="includesubcats" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="1 when descendant categories are included"/>
         <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="User who queued the run"/>
+        <FIELD NAME="importid" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Spreadsheet import the adhoc task reads, or 0"/>
         <FIELD NAME="status" TYPE="char" LENGTH="20" NOTNULL="true" DEFAULT="queued" SEQUENCE="false" COMMENT="queued, running, completed or failed"/>
         <FIELD NAME="snapshotted" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="1 after the course list has been stored"/>
         <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>

@@ -94,15 +94,23 @@ if (!$importid) {
         $mapping = json_decode($import->mapping, true) ?: [];
         $preview = importer::preview($import, $mapping);
         echo $OUTPUT->notification(get_string('filewarning', 'tool_category_enrol_cleanup'), \core\output\notification::NOTIFY_WARNING);
+        echo $OUTPUT->notification(get_string('backgroundremoval', 'tool_category_enrol_cleanup'), \core\output\notification::NOTIFY_INFO);
         $summary = new html_table();
         $summary->attributes['class'] = 'generaltable';
         $summary->data = [
             [get_string('excelfile', 'tool_category_enrol_cleanup'), s($import->filename)],
-            [get_string('previewready', 'tool_category_enrol_cleanup'), (int) $preview->ready],
-            [get_string('previewfailed', 'tool_category_enrol_cleanup'), (int) $preview->failed],
-            [get_string('previewskipped', 'tool_category_enrol_cleanup'), (int) $preview->skipped],
+            [get_string('previewrows', 'tool_category_enrol_cleanup'), (int) $preview->datarows],
         ];
+        if (empty($preview->partial)) {
+            $summary->data[] = [get_string('previewready', 'tool_category_enrol_cleanup'), (int) $preview->ready];
+            $summary->data[] = [get_string('previewfailed', 'tool_category_enrol_cleanup'), (int) $preview->failed];
+            $summary->data[] = [get_string('previewskipped', 'tool_category_enrol_cleanup'), (int) $preview->skipped];
+        }
         echo html_writer::table($summary);
+        if (!empty($preview->partial)) {
+            echo $OUTPUT->notification(get_string('previewsample', 'tool_category_enrol_cleanup', count($preview->rows)),
+                \core\output\notification::NOTIFY_INFO);
+        }
 
         if ($preview->rows) {
             $table = new html_table();
@@ -134,7 +142,7 @@ if (!$importid) {
             html_writer::link(new moodle_url($formurl), get_string('changemapping', 'tool_category_enrol_cleanup')),
             'mb-3'
         );
-        if ($preview->ready > 0) {
+        if ((int) $preview->datarows > 0 && (!empty($preview->partial) || (int) $preview->ready > 0)) {
             echo html_writer::start_tag('form', ['method' => 'post', 'action' => $formurl]);
             echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
             echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'confirm', 'value' => 1]);

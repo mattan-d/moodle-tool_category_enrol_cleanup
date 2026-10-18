@@ -206,7 +206,17 @@ class importer {
      */
     public static function preview(\stdClass $import, array $mapping): \stdClass {
         $parsed = self::read_import($import);
-        return self::resolve_rows($parsed['rows'], $mapping, 30);
+        $datarows = count($parsed['rows']);
+        $sample = 30;
+        if ($datarows > $sample) {
+            $resolved = self::resolve_rows($parsed['rows'], $mapping, $sample, true);
+            $resolved->partial = true;
+        } else {
+            $resolved = self::resolve_rows($parsed['rows'], $mapping, $sample);
+            $resolved->partial = false;
+        }
+        $resolved->datarows = $datarows;
+        return $resolved;
     }
 
     /**
@@ -223,11 +233,6 @@ class importer {
         if (!is_array($mapping)) {
             throw new \moodle_exception('mapmissingcourse', 'tool_category_enrol_cleanup');
         }
-        $parsed = self::read_import($import);
-        $resolved = self::resolve_rows($parsed['rows'], $mapping, 0);
-        if ($resolved->ready < 1) {
-            throw new \moodle_exception('nothingtoqueue', 'tool_category_enrol_cleanup');
-        }
 
         $now = time();
         $runid = $DB->insert_record('tool_catenclean_run', (object) [
@@ -236,45 +241,20 @@ class importer {
             'categoryname' => \core_text::substr($import->filename, 0, 1333),
             'includesubcats' => 0,
             'userid' => $userid,
+            'importid' => (int) $import->id,
             'status' => manager::STATUS_QUEUED,
-            'snapshotted' => 1,
+            'snapshotted' => 0,
             'timecreated' => $now,
             'timestarted' => 0,
             'timefinished' => 0,
-            'coursecount' => $resolved->total,
-            'coursesdone' => $resolved->total - $resolved->ready,
+            'coursecount' => 0,
+            'coursesdone' => 0,
             'unenrolcount' => 0,
             'rolecount' => 0,
-            'errorcount' => $resolved->failed,
+            'errorcount' => 0,
         ]);
 
-        $batch = [];
-        foreach ($resolved->all as $row) {
-            $batch[] = (object) [
-                'runid' => $runid,
-                'linenum' => $row->line,
-                'courseid' => (int) $row->courseid,
-                'userid' => (int) $row->userid,
-                'roleid' => (int) $row->roleid,
-                'courselabel' => \core_text::substr($row->courselabel, 0, 255),
-                'userlabel' => \core_text::substr($row->userlabel, 0, 255),
-                'status' => $row->status,
-                'unenrolcount' => 0,
-                'rolecount' => 0,
-                'message' => $row->message,
-                'timemodified' => $now,
-            ];
-            if (count($batch) >= 200) {
-                $DB->insert_records('tool_catenclean_row', $batch);
-                $batch = [];
-            }
-        }
-        if ($batch) {
-            $DB->insert_records('tool_catenclean_row', $batch);
-        }
-
         \tool_category_enrol_cleanup\task\cleanup_task::queue_for_run((int) $runid, $userid);
-        self::delete_import((int) $import->id, $userid);
 
         $event = \tool_category_enrol_cleanup\event\cleanup_queued::create([
             'context' => \context_system::instance(),
@@ -287,6 +267,115 @@ class importer {
         $event->trigger();
 
         return (int) $runid;
+    }
+
+    /**
+     * Reads the spreadsheet and stores resolved rows until the time budget is spent.
+     *
+     * The file stays available until every data row has been stored. Removal of
+     * enrolments happens afterwards, still inside the adhoc task.
+     *
+     * @param \stdClass $run
+     * @param int $started Unix time when this slice started
+     * @param int $maxruntime Seconds
+     * @return bool True when every data row has been stored
+     */
+    public static function snapshot_run(\stdClass $run, int $started, int $maxruntime): bool {
+        global $DB;
+
+        if (!empty($run->snapshotted)) {
+            return true;
+        }
+
+        $import = $DB->get_record('tool_catenclean_import', [
+            'id' => $run->importid,
+            'userid' => $run->userid,
+        ]);
+        if (!$import) {
+            throw new \moodle_exception('nofile', 'tool_category_enrol_cleanup');
+        }
+        $mapping = json_decode($import->mapping ?? '', true);
+        if (!is_array($mapping)) {
+            throw new \moodle_exception('mapmissingcourse', 'tool_category_enrol_cleanup');
+        }
+
+        $parsed = self::read_import($import);
+        $lastline = (int) $DB->get_field_sql(
+            "SELECT MAX(linenum) FROM {tool_catenclean_row} WHERE runid = ?",
+            [$run->id]
+        );
+
+        $line = 1;
+        $batch = [];
+        $finished = true;
+        foreach ($parsed['rows'] as $cells) {
+            $line++;
+            if (self::row_is_empty($cells) || $line <= $lastline) {
+                continue;
+            }
+            if ((time() - $started) >= $maxruntime) {
+                $finished = false;
+                break;
+            }
+            $resolved = self::resolve($cells, $mapping);
+            $resolved->line = $line;
+            $batch[] = self::row_record((int) $run->id, $resolved);
+            if (count($batch) >= 50) {
+                $DB->insert_records('tool_catenclean_row', $batch);
+                $batch = [];
+            }
+        }
+        if ($batch) {
+            $DB->insert_records('tool_catenclean_row', $batch);
+        }
+        if (!$finished) {
+            return false;
+        }
+
+        $counts = $DB->get_record_sql(
+            "SELECT COUNT(1) AS total,
+                    COALESCE(SUM(CASE WHEN status = :pending THEN 1 ELSE 0 END), 0) AS ready,
+                    COALESCE(SUM(CASE WHEN status = :failed THEN 1 ELSE 0 END), 0) AS failed
+               FROM {tool_catenclean_row}
+              WHERE runid = :runid",
+            [
+                'runid' => $run->id,
+                'pending' => manager::COURSE_PENDING,
+                'failed' => manager::COURSE_FAILED,
+            ]
+        );
+        $total = (int) $counts->total;
+        $DB->update_record('tool_catenclean_run', (object) [
+            'id' => $run->id,
+            'snapshotted' => 1,
+            'coursecount' => $total,
+            'coursesdone' => $total - (int) $counts->ready,
+            'errorcount' => (int) $counts->failed,
+        ]);
+        self::delete_import((int) $import->id, (int) $run->userid);
+        return true;
+    }
+
+    /**
+     * @param int $runid
+     * @param \stdClass $row
+     * @return \stdClass
+     */
+    private static function row_record(int $runid, \stdClass $row): \stdClass {
+        return (object) [
+            'runid' => $runid,
+            'linenum' => $row->line,
+            'courseid' => (int) $row->courseid,
+            'userid' => (int) $row->userid,
+            'roleid' => (int) $row->roleid,
+            'courselabel' => \core_text::substr($row->courselabel, 0, 255),
+            'userlabel' => \core_text::substr($row->userlabel, 0, 255),
+            'status' => $row->status,
+            'unenrolcount' => 0,
+            'rolecount' => 0,
+            'message' => $row->message,
+            'timemodified' => time(),
+        ];
     }
 
     /**
@@ -308,15 +397,15 @@ class importer {
     /**
      * @param array $rows
      * @param array $mapping
-     * @param int $samples Maximum resolved rows to keep for display. 0 keeps all, which queue() needs.
+     * @param int $samples Maximum resolved rows to keep for display
+     * @param bool $stoplimit Stop after that many rows instead of scanning the whole file
      * @return \stdClass
      */
-    private static function resolve_rows(array $rows, array $mapping, int $samples): \stdClass {
+    private static function resolve_rows(array $rows, array $mapping, int $samples, bool $stoplimit = false): \stdClass {
         $ready = 0;
         $failed = 0;
         $skipped = 0;
         $shown = [];
-        $all = [];
         $line = 1;
         foreach ($rows as $cells) {
             $line++;
@@ -332,15 +421,12 @@ class importer {
             } else {
                 $failed++;
             }
-            if ($samples === 0 || count($shown) < $samples) {
+            if (count($shown) < $samples) {
                 $shown[] = $resolved;
             }
-            if ($samples === 0) {
-                $all[] = $resolved;
+            if ($stoplimit && count($shown) >= $samples) {
+                break;
             }
-        }
-        if ($samples === 0) {
-            $shown = array_slice($all, 0, 30);
         }
         return (object) [
             'ready' => $ready,
@@ -348,7 +434,8 @@ class importer {
             'skipped' => $skipped,
             'total' => $ready + $failed + $skipped,
             'rows' => $shown,
-            'all' => $all,
+            'partial' => false,
+            'datarows' => $ready + $failed + $skipped,
         ];
     }
 

@@ -53,5 +53,15 @@ function xmldb_tool_category_enrol_cleanup_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026101800, 'tool', 'category_enrol_cleanup');
     }
 
+    if ($oldversion < 2026101801) {
+        $table = new xmldb_table('tool_catenclean_run');
+        $field = new xmldb_field('importid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0', 'userid');
+        if (!$dbman->field_exists($table, $field)) {
+            $dbman->add_field($table, $field);
+        }
+
+        upgrade_plugin_savepoint(true, 2026101801, 'tool', 'category_enrol_cleanup');
+    }
+
     return true;
 }
